@@ -1,33 +1,15 @@
-const inquirer = require("inquirer");
-const chalk = require('chalk');
-const request = require('request');
-const beep = require('beepbeep');
-const config = require('config');
+import inquirer from "inquirer"
+import chalk from 'chalk'
+import request from 'request'
+import beeper from 'beeper'
+import config from 'config'
+import { FatNumber } from "./fat-number.js"
 
 const prizes = []
 
 console.clear();
 logo();
-menu();
-
-class FatNumber {
-    constructor(number, name) {
-        this.name = name;
-        this.number = number;
-    }
-    setMoney(prize) {
-        this.prize = prize;
-    }
-    getNumber() {
-        return this.number;
-    }
-    getNumberPad() {
-        return `${this.number}`.padStart(5);
-    }
-    getName() {
-        return this.name;
-    }
-}
+await menu();
 
 function logo() {
     console.log('#  .__          __    __                                       .__                   __                 ');
@@ -44,43 +26,38 @@ function logo() {
     console.log('#                                                                                                       ');
 }
 
-function menu() {
-    inquirer.prompt([
+async function menu() {
+    const options = [`Check ${chalk.green('A')}ll from config recursively`, `${chalk.green('F')}at christmas prize for one number`, `${chalk.green('D')}raw status`, `${chalk.green('R')}epeating check to number`, `${chalk.red('E')}xit`]
+    const { option } = await inquirer.prompt([
         {
-            name: 'decission',
-            message: `What would you like to check?\rCheck ${chalk.green('A')}ll from config recursively.\r ${chalk.green('F')}at christmas prize for one number.\r${chalk.green('D')}raw status.\r${chalk.green('R')}epeating check to number.\r${chalk.red('E')}xit: `,
-            type: 'input'
+            name: 'option',
+            message: `What would you like to check?`,
+            type: 'list',
+            choices: options
         }
-    ]).then(({ decission }) => {
-        if (decission == 'F' || decission == 'f')
-            inquirer.prompt([
-                {
-                    name: 'number',
-                    message: 'Number: ',
-                    type: 'input'
-                }
-            ]).then(({ number }) => {
-                fatCheckerNumber(number);
-            });
-        else if (decission == 'D' || decission == 'd')
-            fatCheckDrawStatus();
-        else if (decission == 'R' || decission == 'r')
-            inquirer.prompt([
-                {
-                    name: 'number',
-                    message: 'Number: ',
-                    type: 'input'
-                }
-            ]).then(({ number }) => {
-                fatCheckerNumber(number)
-                setInterval(() => fatCheckerNumber(number), 60000);
-            });
-        else if (decission == 'A' || decission == 'a') {
+    ])
+    await beeper(3)
+    switch (option) {
+        case options[0]:
             let numbers = config.get("numbers").map(number => new FatNumber(number.number, number.name));
             allFatCheckerNumberNamed(numbers);
             setInterval(() => allFatCheckerNumberNamed(numbers), config.get("time"));
-        }
-    });
+            break;
+        case options[1]:
+            fatCheckerNumber(new FatNumber(await promptNumber(), 'Number Entered'));
+            break;
+        case options[2]:
+            fatCheckDrawStatus();
+            break;
+        case options[3]:
+            const number = new FatNumber(await promptNumber(), 'Recursive Entered')
+            fatCheckerNumber(number)
+            setInterval(() => fatCheckerNumber(number), 60000);
+            break;
+
+        default:
+            break;
+    }
 }
 
 function fatCheckDrawStatus() {
@@ -120,10 +97,21 @@ function fatCheckerNumber(number) {
 
             const index = prizes.findIndex(x => x.number === number.getNumber());
 
-            if(index === -1 || prizes[index].prize !== result.premio) beep();
+            if (index === -1 || prizes[index].prize !== result.premio) beeper(3)
 
-            if(index === -1) prizes.push({number: number.getNumber(), prize: result.premio});
-            else if(prizes[index].prize !== result.premio) prizes[index].prize = result.premio;
+            if (index === -1) prizes.push({ number: number.getNumber(), prize: result.premio });
+            else if (prizes[index].prize !== result.premio) prizes[index].prize = result.premio;
         }
     });
+}
+
+async function promptNumber() {
+    const { number } = await inquirer.prompt([
+        {
+            name: 'number',
+            message: 'Number: ',
+            type: 'text'
+        }
+    ])
+    return number
 }
