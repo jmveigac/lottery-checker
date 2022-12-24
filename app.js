@@ -4,12 +4,21 @@ import request from 'request'
 import beeper from 'beeper'
 import config from 'config'
 import { FatNumber } from "./fat-number.js"
+import { exec } from 'child_process';
+import { Participant, Participation } from "./participant.js"
 
 const prizes = []
+
+/** @type {Participant[]} */
+const participants = [];
 
 console.clear();
 logo();
 await menu();
+
+function beep() {
+    exec(`rundll32 user32.dll,MessageBeep`)
+}
 
 function logo() {
     console.log('#  .__          __    __                                       .__                   __                 ');
@@ -36,10 +45,10 @@ async function menu() {
             choices: options
         }
     ])
-    await beeper(3)
+    await beep()
     switch (option) {
         case options[0]:
-            let numbers = config.get("numbers").map(number => new FatNumber(number.number, number.name));
+            let numbers = config.get("numbers").map(number => new FatNumber(number.number, number.name, number.personal));
             allFatCheckerNumberNamed(numbers);
             setInterval(() => allFatCheckerNumberNamed(numbers), config.get("time"));
             break;
@@ -63,19 +72,41 @@ async function menu() {
 function fatCheckDrawStatus() {
     request(`https://api.elpais.com/ws/LoteriaNavidadPremiados?s=1`, { json: true }, (err, res, body) => {
         if (err) { return console.log(err); }
-        console.log(res.body);
+
+        const status = JSON.parse(res.body.replace('info=', '')).status;
+
+        if(status > 1) {
+            console.log('FINISH');
+            beep();
+            process.exit();
+        }
+        else if(status === 0) console.log("Not stated yet");
+        else console.log('Running...');
     });
 }
 
+/**
+ * 
+ * @param {FatNumber[]} numbers 
+ */
 function allFatCheckerNumberNamed(numbers) {
+    if(!participants.length) participants.push(...createParticipants(numbers));
+
     console.clear();
     logo();
 
     numbers.forEach(function (item) {
         fatCheckerNumber(item);
     });
+
+    printParticipants(participants);
+    fatCheckDrawStatus();
 }
 
+/**
+ * 
+ * @param {FatNumber} number 
+ */
 function fatCheckerNumber(number) {
     request(`https://api.elpais.com/ws/LoteriaNavidadPremiados?n=${number.getNumber()}`, { json: true }, (err, res, body) => {
         if (err) {
@@ -86,23 +117,77 @@ function fatCheckerNumber(number) {
         let result = JSON.parse(res.body.replace("busqueda=", ""));
 
         if (result.error !== 0) {
-            console.log(`###### ${number.getName().padEnd(10)} ${number.getNumberPad()} ERROR`);
+            number.error = true;
             return;
         }
 
-        if (result.premio == 0)
-            console.log(`-> ${number.getName().padEnd(10)} ${number.getNumberPad()} Prize: ${chalk.red(result.premio)}`);
-        else {
-            console.log(chalk.green(`** ${number.getName().padEnd(10)} ${number.getNumberPad()} Prize: ${result.premio}`));
-
+        if (result.premio > 0) {
+            number.setMoney(result.premio);
             const index = prizes.findIndex(x => x.number === number.getNumber());
 
-            if (index === -1 || prizes[index].prize !== result.premio) beeper(3)
+            if (index === -1 || prizes[index].prize !== result.premio) beep()
 
-            if (index === -1) prizes.push({ number: number.getNumber(), prize: result.premio });
+            if (index === -1) prizes.push(number);
             else if (prizes[index].prize !== result.premio) prizes[index].prize = result.premio;
         }
     });
+}
+
+/**
+ * 
+ * @param {FatNumber[]} numbers 
+ */
+function printNumbers(numbers) {
+    numbers.sort(number => number.name).forEach(number => printNumber(number));
+}
+
+/**
+ * 
+ * @param {FatNumber} number 
+ */
+function printNumber(number) {
+    let numberStr = `-> ${number.getName().padEnd(10)} ${number.getNumberPad()} Prize: ${chalk.red(number.prize)}`;
+    if (number.getError()) numberStr = `###### ${number.getName().padEnd(10)} ${number.getNumberPad()} ERROR`;
+    else if (number.prize > 0) numberStr = chalk.green(`** ${number.getName().padEnd(10)} ${number.getNumberPad()} Prize: ${number.prize}`);
+
+    console.log(numberStr);
+}
+
+/**
+ * 
+ * @param {Participant[]} participants 
+ */
+function printParticipants(participants) {
+    const table = participants.map(p => ({name: p.name, prize: p.getMoney(), numbers: p.participations.filter(n => n.number.name === p.name && n.number.prize > 0).map(n => n.number.number)}));
+    console.table(table);
+}
+
+/**
+ * 
+ * @param {FatNumber[]} numbers
+ * @returns {Participant[]}
+ */
+function createParticipants(numbers) {
+    const totalGroupParticipants = numbers.filter(n => !n.isPersonal).length;
+
+    const participants = numbers.reduce((/** @type {Participant[]} */participants, /** @type {FatNumber} */number) => {
+        let participant = participants.find(p => p.name === number.name);
+
+        if (!participant) {
+            participant = new Participant(number.name);
+            participants.push(participant);
+        }
+
+        participant.participations.push(new Participation(number, number.isPersonal ? 1 : 1 / totalGroupParticipants));
+
+        return participants;
+    }, []);
+
+    participants
+        .filter(p => p.participations.filter(n => !n.number.isPersonal).length > 0)
+        .forEach(p => numbers.filter(n => !n.isPersonal).forEach(n => p.addParticipation(n, 1/totalGroupParticipants)));
+
+    return participants;
 }
 
 async function promptNumber() {
