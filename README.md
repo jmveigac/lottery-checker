@@ -13,7 +13,8 @@ To use option A(Check All from config recursively.) you need to add the followin
         },
         {
             "number": 54321,
-            "name": "name 2"
+            "name": "name 2",
+            "private": true
         }
     ],
     "time": 10000
