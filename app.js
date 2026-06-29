@@ -1,11 +1,18 @@
 import inquirer from "inquirer"
 import chalk from 'chalk'
-import request from 'request'
 import beeper from 'beeper'
 import config from 'config'
 import { FatNumber } from "./fat-number.js"
-import { exec } from 'child_process';
+import { execFile } from 'child_process';
 import { Participant, Participation } from "./participant.js"
+
+const LOTTERY_API_BASE_URL = process.env.LOTTERY_API_BASE_URL ?? 'https://api.elpais.com/ws/LoteriaNavidadPremiados';
+const REQUEST_TIMEOUT_MS = Number(process.env.LOTTERY_REQUEST_TIMEOUT_MS ?? 10000);
+const NUMBER_POLL_INTERVAL_MS = 60000;
+const DRAW_STATUS = {
+    NOT_STARTED: 0,
+    RUNNING: 1,
+};
 
 const prizes = []
 
@@ -17,16 +24,21 @@ logo();
 await menu();
 
 function beep() {
-    exec(`rundll32 user32.dll,MessageBeep`)
+    if (process.platform === 'win32') {
+        execFile('rundll32', ['user32.dll,MessageBeep']);
+        return;
+    }
+
+    beeper();
 }
 
 function logo() {
     console.log('#  .__          __    __                                       .__                   __                 ');
     console.log('#  |  |   _____/  |__/  |_  ___________ ___.__.           ____ |  |__   ____   ____ |  | __ ___________ ');
     console.log('#  |  |  /  _ \\   __\\   __\\/ __ \\_  __ <   |  |  ______ _/ ___\\|  |  \\_/ __ \\_/ ___\\|  |/ // __ \\_  __ \\');
-    console.log('#  |  |_(  <_> )  |  |  | \\  ___/|  | \\/\\___  | /_____/ \\  \\___|   Y  \\  ___/\\  \\___|    <\\  ___/|  | \\/');
+    console.log('#  |  |_(  <_> )  |  |  | \\  ___/|  | \/\\___  | /_____/ \\  \\___|   Y  \\  ___/\\  \\___|    <\\  ___/|  | \/');
     console.log('#  |____/\\____/|__|  |__|  \\___  >__|   / ____|          \\___  >___|  /\\___  >\\___  >__|_ \\\\___  >__|   ');
-    console.log('#                              \\/       \\/                   \\/     \\/     \\/     \\/     \\/    \\/       ');
+    console.log('#                              \/       \/                   \/     \/     \/     \/     \/    \/       ');
     console.log('#                                                                                                       ');
     console.log('#                                                                                                       ');
     console.log('#                                                                                                       ');
@@ -49,19 +61,19 @@ async function menu() {
     switch (option) {
         case options[0]:
             let numbers = config.get("numbers").map(number => new FatNumber(number.number, number.name, number.personal));
-            allFatCheckerNumberNamed(numbers);
+            await allFatCheckerNumberNamed(numbers);
             setInterval(() => allFatCheckerNumberNamed(numbers), config.get("time"));
             break;
         case options[1]:
-            fatCheckerNumber(new FatNumber(await promptNumber(), 'Number Entered'));
+            await fatCheckerNumber(new FatNumber(await promptNumber(), 'Number Entered'));
             break;
         case options[2]:
-            fatCheckDrawStatus();
+            await fatCheckDrawStatus();
             break;
         case options[3]:
             const number = new FatNumber(await promptNumber(), 'Recursive Entered')
-            fatCheckerNumber(number)
-            setInterval(() => fatCheckerNumber(number), 60000);
+            await fatCheckerNumber(number)
+            setInterval(() => fatCheckerNumber(number), NUMBER_POLL_INTERVAL_MS);
             break;
 
         default:
@@ -69,52 +81,51 @@ async function menu() {
     }
 }
 
-function fatCheckDrawStatus() {
-    request(`https://api.elpais.com/ws/LoteriaNavidadPremiados?s=1`, { json: true }, (err, res, body) => {
-        if (err) { return console.log(err); }
+async function fatCheckDrawStatus() {
+    try {
+        const result = await fetchLotteryPayload({ queryParameter: 's', value: '1', jsonpPrefix: 'info=' });
+        const status = Number(result.status);
 
-        const status = JSON.parse(res.body.replace('info=', '')).status;
-
-        if(status > 1) {
+        if(status > DRAW_STATUS.RUNNING) {
             console.log('FINISH');
             beep();
             process.exit();
         }
-        else if(status === 0) console.log("Not stated yet");
+        else if(status === DRAW_STATUS.NOT_STARTED) console.log("Not stated yet");
         else console.log('Running...');
-    });
+    }
+    catch (error) {
+        console.log(`Draw status check failed: ${error.message}`);
+    }
 }
 
 /**
  * 
  * @param {FatNumber[]} numbers 
  */
-function allFatCheckerNumberNamed(numbers) {
+async function allFatCheckerNumberNamed(numbers) {
     if(!participants.length) participants.push(...createParticipants(numbers));
 
     console.clear();
     logo();
 
-    numbers.forEach(function (item) {
-        fatCheckerNumber(item);
-    });
+    await Promise.all(numbers.map(number => fatCheckerNumber(number)));
 
     printParticipants(participants);
-    fatCheckDrawStatus();
+    await fatCheckDrawStatus();
 }
 
 /**
  * 
  * @param {FatNumber} number 
  */
-function fatCheckerNumber(number) {
-    request(`https://api.elpais.com/ws/LoteriaNavidadPremiados?n=${number.getNumber()}`, { json: true }, (err, res, body) => {
-        if (err) {
-            console.log(JSON.stringify(err));
-            return;
-        }
-
-        let result = JSON.parse(res.body.replace("busqueda=", ""));
+async function fatCheckerNumber(number) {
+    try {
+        const result = await fetchLotteryPayload({
+            queryParameter: 'n',
+            value: number.getNumber(),
+            jsonpPrefix: 'busqueda=',
+        });
 
         if (result.error !== 0) {
             number.error = true;
@@ -130,7 +141,50 @@ function fatCheckerNumber(number) {
             if (index === -1) prizes.push(number);
             else if (prizes[index].prize !== result.premio) prizes[index].prize = result.premio;
         }
-    });
+    }
+    catch (error) {
+        number.error = true;
+        console.log(`Number ${number.getNumberPad()} check failed: ${error.message}`);
+    }
+}
+
+async function fetchLotteryPayload({ queryParameter, value, jsonpPrefix }) {
+    const url = new URL(LOTTERY_API_BASE_URL);
+    url.searchParams.set(queryParameter, value);
+
+    const response = await fetchWithTimeout(url, REQUEST_TIMEOUT_MS);
+    const body = await response.text();
+
+    if (!response.ok) {
+        throw new Error(`Endpoint responded with ${response.status}`);
+    }
+
+    if (!body.startsWith(jsonpPrefix)) {
+        throw new Error(`Unexpected endpoint response format`);
+    }
+
+    return parseLotteryPayload(body, jsonpPrefix);
+}
+
+async function fetchWithTimeout(url, timeoutMs) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+        return await fetch(url, { signal: controller.signal });
+    }
+    finally {
+        clearTimeout(timeout);
+    }
+}
+
+function parseLotteryPayload(body, jsonpPrefix) {
+    try {
+        return JSON.parse(body.slice(jsonpPrefix.length));
+    }
+    catch {
+        throw new Error('Endpoint returned invalid JSON payload');
+    }
 }
 
 /**
@@ -195,7 +249,9 @@ async function promptNumber() {
         {
             name: 'number',
             message: 'Number: ',
-            type: 'text'
+            type: 'text',
+            validate: value => /^\d{1,5}$/.test(value) || 'Enter a lottery number from 0 to 99999',
+            filter: value => value.trim().padStart(5, '0'),
         }
     ])
     return number
